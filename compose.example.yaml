@@ -1,0 +1,19 @@
+# Drop-in service block. Put it in your own compose file, or run it on its own with:
+#   docker compose -f compose.example.yaml up -d
+# First: mkdir data && chown 999 data   (the container user must be able to write there)
+# Keep a title longer:  docker compose -f compose.example.yaml exec lombo-farewell lombo-farewell keep "Title"
+services:
+  lombo-farewell:
+    image: ghcr.io/lombo-forge/lombo-farewell:latest   # or build: .
+    container_name: lombo-farewell
+    restart: unless-stopped
+    env_file: .env
+    read_only: true
+    mem_limit: 128m
+    volumes:
+      - ./data:/data   # state file; with SOURCE=file also put your list here (SOURCE_FILE=/data/leaving.txt)
+    # If Jellyfin and Maintainerr are in another compose project, join its network:
+    # networks: [media]
+# networks:
+#   media:
+#     external: true
