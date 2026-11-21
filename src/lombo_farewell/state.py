@@ -45,13 +45,37 @@ def load(path: str) -> dict[str, Any]:
     return out
 
 
+LEAVING_FILE = "leaving.json"
+LEAVING_VERSION = 1
+
+
 def save(path: str, state: dict[str, Any]) -> None:
+    _write_atomic(path, json.dumps(state), 0o600)
+
+
+def leaving_path(state_file: str) -> Path:
+    """`leaving.json` sits beside the state file."""
+    return Path(state_file).parent / LEAVING_FILE
+
+
+def leaving_document(rows: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    """The versioned shape other apps read (docs/contracts.md); the API returns the same."""
+    return {"version": LEAVING_VERSION, "updated": int(now), "entries": rows}
+
+
+def save_leaving(state_file: str, rows: list[dict[str, Any]], now: float) -> None:
+    """Write `leaving.json` atomically. Readable by other users on purpose: it holds titles, no secrets."""
+    _write_atomic(str(leaving_path(state_file)), json.dumps(leaving_document(rows, now)), 0o644)
+
+
+def _write_atomic(path: str, text: str, mode: int) -> None:
     tmp = ""
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=str(Path(path).parent))
         with os.fdopen(fd, "w") as handle:
-            handle.write(json.dumps(state))
+            os.fchmod(handle.fileno(), mode)
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)

@@ -65,6 +65,7 @@ Setup details: [docs/setup.md](docs/setup.md).
 | `lombo-farewell plan` | Shows what the next round would do. Never changes anything. |
 | `lombo-farewell run [--loop]` | Does it. `--loop` repeats every `LOMBO_FAREWELL_INTERVAL_SECONDS`. With `DRY_RUN=true` it only prints. |
 | `lombo-farewell keep "Title"` | Postpones one title's deletion by `KEEP_DAYS` (Maintainerr source only). With `DRY_RUN=true` it only says what it would do. |
+| `lombo-farewell serve` | Optional small HTTP API so a web page or another app can read the leaving list and ask for a keep. Needs `LOMBO_FAREWELL_API_TOKEN`. See below. |
 
 ## Where the list comes from
 
@@ -79,13 +80,25 @@ The source is a setting, `LOMBO_FAREWELL_SOURCE`:
 lombo-farewell keep "Alpha Movie"      # a unique part of the name works too
 ```
 
-It asks the source to push the deletion back by `KEEP_DAYS` days and notes in the state file that it was kept, and until when. Rules carried over from the original: a title can be kept only while it is inside its normal wait, and (from the state file) at most once every `KEEP_DAYS` days, so running the command twice in a row does nothing the second time; once the extra time is nearly used up it can be kept again. The state file is what remembers the last keep: if it is deleted, the limit starts over. There is no viewer-facing way to run `keep`; do not wire it to a chat bot that viewers can use. Anything unclear (unknown title, two titles that match, source down) does nothing and says why.
+It asks the source to push the deletion back by `KEEP_DAYS` days and notes in the state file that it was kept, and until when. Rules carried over from the original: a title can be kept only while it is inside its normal wait, and (from the state file) at most once every `KEEP_DAYS` days, so running the command twice in a row does nothing the second time; once the extra time is nearly used up it can be kept again. The state file is what remembers the last keep: if it is deleted, the limit starts over. By default there is no viewer-facing way to run `keep`; do not wire the command to a chat bot that viewers can use. Anything unclear (unknown title, two titles that match, source down) does nothing and says why.
 
-The original had a "Keep it longer" button on the title's page, drawn by a script injected into the web client and answered by a server. That needs a web server, a reverse-proxy route and a page script, so this app does not do it. A command is the simplest thing that gives the same result and needs no server. A viewer who wants a title kept asks the person who runs the server, or you can put the command behind whatever you already use (a chat bot, a shortcut). Making a Jellyfin favourite or tag mean "keep" was considered and left out: it would make a viewer's tap spend a deletion postponement without any confirmation.
+### The HTTP API (optional)
+
+The original had a "Keep it longer" button on the title's page, drawn by a script in the web client and answered by a server. This app does not draw buttons, but `lombo-farewell serve` is the server half: a small standard-library HTTP server with three routes and nothing else.
+
+- `GET /v1/leaving`: the leaving list as JSON (id, title, days left, can_keep).
+- `POST /v1/keep` with `{"title": "..."}`: the same check and postpone as `lombo-farewell keep`; answers `{"ok": ..., "message": ...}`.
+- `GET /v1/health`.
+
+It is off until you set `LOMBO_FAREWELL_API_TOKEN` (at least 24 characters), listens on `127.0.0.1:8098` by default, honours `DRY_RUN`, and needs `Authorization: Bearer <token>` on every request. It sends no CORS headers: a web page must reach it through **your own reverse proxy**, which adds the token ([Caddy and nginx snippets](examples/)); never put the token in browser code. Read [docs/security.md](docs/security.md) first, in particular that the token identifies the proxy and not the viewer: whoever can open the proxied path can postpone a deletion (within the keep limits above). The routes and the file other apps can read are specified in [docs/contracts.md](docs/contracts.md).
+
+A live round also writes `leaving.json` beside the state file: the same list, in a versioned shape, for other apps to read without calling anything. A dry run writes no files.
+
+Making a Jellyfin favourite or tag mean "keep" was considered and left out: it would make a viewer's tap spend a deletion postponement without any confirmation.
 
 ## Settings
 
-Everything is an environment variable with the `LOMBO_FAREWELL_` prefix, listed with defaults in [.env.example](.env.example). A bad value (including a typo in a true/false setting) stops the app at start-up and names the variable. A misspelled setting *name* does not stop it: the app prints a warning naming the unknown `LOMBO_FAREWELL_*` variable and uses the default.
+Everything is an environment variable with the `LOMBO_FAREWELL_` prefix, listed with defaults in [.env.example](.env.example). A bad value (including a typo in a true/false setting) stops the app at start-up and names the variable. The two API settings are `LOMBO_FAREWELL_API_TOKEN` (required by `serve`, at least 24 characters) and `LOMBO_FAREWELL_API_BIND` (default `127.0.0.1:8098`; any other address prints a warning in `doctor` and at start). A misspelled setting *name* does not stop it: the app prints a warning naming the unknown `LOMBO_FAREWELL_*` variable and uses the default.
 
 ## What is not verified
 
@@ -94,6 +107,8 @@ Everything here was tested against **fake servers written for the tests**, never
 - **Never run against a real Jellyfin.** The calls (`GET /Items` with `IncludeItemTypes=BoxSet`, `ParentId`, `Ids` and `SearchTerm`; `POST /Collections`; `POST` and `DELETE /Collections/{id}/Items`) follow what the original app did with an API key, but their exact replies on current Jellyfin versions are assumed, not confirmed. In particular: whether an API key sees a collection's members the way the code expects, whether a collection made this way shows in every client, and the title search by exact name.
 - **Never run against a real Maintainerr.** The three endpoints and the field names (`isActive`, `deleteAfterDays`, `mediaServerId`, `addDate`, `deletionDate`) come from the original app's code and may have changed in newer Maintainerr versions.
 - The third-audit fixes (shrink guard, owned-collection check, keep limit, redirect refusal, number checks, text cleaning, run lock) are covered by tests against the fake servers only. The lock and the redirect refusal were not tried against a real proxy or a real second process; the duplicate-collection race on a first run of two processes is prevented by the lock but was not run for real.
+- **The HTTP API** (`serve`) was tested only with a real socket on `127.0.0.1` and Python's own HTTP client, against the fake servers. It was never run behind a real Caddy or nginx (the two snippets in `examples/` are untested), never called from a real web page, and no Jellyfin client script uses it yet. IPv6 binds and a non-loopback bind were not tried. It has had no independent security review.
+- `leaving.json` is tested for its shape, its mode and its atomic write, but no other app reads it yet.
 - No collection ordering: Jellyfin has no reorder call, so titles are added soonest first and clients sort as they like.
 - The container image was not built and the CI workflows were not run.
 
@@ -106,6 +121,8 @@ Everything here was tested against **fake servers written for the tests**, never
 **Can I use another cleanup tool?** Yes: write the titles to a file (`SOURCE=file`).
 
 **What if the tool deletes a title that is overdue?** It leaves the collection on the next round (the source no longer lists it).
+
+**Can a button in Jellyfin call it?** The server half exists (`serve`); the button belongs in a web-client script such as the Shelf plugin, which does not call it yet.
 
 **Why does `keep` not work with the file source?** There is nothing to tell the other tool. Change the date or remove the line in your file.
 

@@ -30,17 +30,20 @@ It has not been run against a real Jellyfin or Maintainerr; the README lists wha
 | `src/lombo_farewell/state.py` | The JSON state file (kept titles, overdue alerts). |
 | `src/lombo_farewell/config.py` | Settings from `LOMBO_FAREWELL_*` environment variables; `SETTINGS` lists them all. |
 | `src/lombo_farewell/notify.py` | Webhook alerts. |
-| `src/lombo_farewell/cli.py` | `doctor`, `plan`, `run`, `keep`. The only place that prints or reads the clock. |
+| `src/lombo_farewell/api.py` | The optional HTTP API (`serve`): routes, token check, failure limit, body limits. Only HTTP; the rules come in as two functions from `cli.py`. Never logs the token or a body. Read `docs/security.md` before changing it. |
+| `src/lombo_farewell/cli.py` | `doctor`, `plan`, `run`, `keep`, `serve`. The only place that prints or reads the clock. |
 | `tests/` | pytest. One fake server (Jellyfin, Maintainerr and webhook) in `conftest.py`. |
 | `scripts/leak-check.sh` | Fails when private or personal strings appear. CI runs it. |
-| `docs/` | One topic per file, each with a `## Contents` list. |
+| `examples/` | Reverse-proxy snippets (Caddy, nginx) that add the API token for two routes. |
+| `docs/` | One topic per file, each with a `## Contents` list. `contracts.md` and `security.md` cover the API. |
 
 ## Rules
 
 - **Keep `core.py` pure.** If a rule needs data, pass it in (the clock is an argument).
 - **Never delete.** The only Jellyfin deletes allowed are `DELETE /Collections/{id}/Items` (unlist from the collection). A test checks this.
 - **Fail safe.** A source or Jellyfin that cannot be read ends the round before any write. Additions go before removals. Removals are capped per round, and held back entirely when the list shrinks under half (`ALLOW_SHRINK`). A collection this tool did not make is left alone (`ADOPT`). A title the source lists but Jellyfin cannot match is never removed for that. No empty collection is ever created. Never follow a redirect with the API key. Titles are passed through `core.clean()` before they are printed or sent.
-- **Safe by default.** `DRY_RUN` defaults to true. `plan` never writes anything. `keep` does nothing in dry run.
+- **Safe by default.** `DRY_RUN` defaults to true. `plan` never writes anything. `keep` does nothing in dry run, and neither does a keep over the API; a dry run writes no `leaving.json`.
+- **The API and `leaving.json` are contracts.** Routes, status codes and the file shape are in `docs/contracts.md`; change them there in the same pull request, and bump `version` only as that file says. The API needs a token of 24+ characters, sends no CORS headers, and the token is never logged or put in browser code.
 - **A new setting** goes in `config.py` (validated, message names the variable), `SETTINGS`, `.env.example` (a test keeps them in sync).
 - **A new source** follows the contract in `docs/architecture.md` (`can_postpone`, `fetch`, `postpone`, `SourceError`).
 - **Never put private details in the repo:** real hostnames, IPs, webhook URLs, keys, local paths. Use `jellyfin.example.com`, `/mnt/media`, `changeme`. `scripts/leak-check.sh` enforces it; patterns live in `scripts/leak-patterns.txt`.

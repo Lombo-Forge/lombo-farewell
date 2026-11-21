@@ -148,6 +148,24 @@ def keep_check(entry: Entry | None, kept: dict[str, object] | None = None, now: 
     return "ok"
 
 
+def leaving_rows(
+    entries: list[Entry], kept: dict[str, dict[str, object]], now: float, keep_days: int
+) -> list[dict[str, object]]:
+    """The leaving list as plain data for `leaving.json` and the API (docs/contracts.md), soonest first.
+
+    `can_keep` is true only when a keep would go ahead now: inside the normal wait and not kept lately.
+    """
+    return [
+        {
+            "id": e.item_id,
+            "title": clean(e.title),
+            "days_left": e.days_left,
+            "can_keep": keep_check(e, kept.get(e.item_id), now, keep_days) == "ok",
+        }
+        for e in entries
+    ]
+
+
 def clean(text: str) -> str:
     """Make a title safe to print or send: control characters and chat markup become '?'."""
     return "".join("?" if (not c.isprintable() or c in "<>@[]") else c for c in text)

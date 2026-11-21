@@ -48,6 +48,8 @@ The title stays in the collection until it is really gone; Jellyfin shows no per
 
 The state file (`LOMBO_FAREWELL_STATE_FILE`, JSON) holds the titles that were kept (name, when, until) and the ids already alerted as overdue. Deleting it can repeat an overdue alert and nothing else.
 
+A live round also writes `leaving.json` next to it: the leaving list for other apps to read. It is a view, rebuilt every round, and nothing reads it back; its shape is in [contracts.md](contracts.md).
+
 ## What it never does
 
-Delete a title or a file; change the cleanup tool's rules; create an empty collection; empty the collection in one round because a source misbehaved; change anything in dry run; or run a server.
+Delete a title or a file; change the cleanup tool's rules; create an empty collection; empty the collection in one round because a source misbehaved; or change anything in dry run. It runs no server unless you start `lombo-farewell serve` yourself (a separate, optional process: [security.md](security.md)).
