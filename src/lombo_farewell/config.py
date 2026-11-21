@@ -4,6 +4,7 @@ Every setting has a LOMBO_FAREWELL_ prefix so it never collides with another con
 A bad value stops the app at start-up with a message that names the variable.
 """
 
+import ipaddress
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -25,7 +26,12 @@ SETTINGS = (
     "STATE_FILE",
     "ALLOW_SHRINK",
     "ADOPT",
+    "API_TOKEN",
+    "API_BIND",
 )
+
+TOKEN_MIN = 24
+DEFAULT_BIND = "127.0.0.1:8098"
 
 SOURCES = ("maintainerr", "file")
 
@@ -50,6 +56,8 @@ class Config:
     state_file: str
     allow_shrink: bool = False  # let a round remove titles even when the list shrank to under half
     adopt: bool = False  # let this tool manage a collection it did not make
+    api_token: str = ""  # `serve` needs it (see token_problem); empty means the API is off
+    api_bind: str = DEFAULT_BIND  # host:port `serve` listens on
 
 
 def _truthy(value: str, name: str) -> bool:
@@ -77,6 +85,36 @@ def _whole(value: str, name: str, low: int, high: int) -> int:
     if not low <= number <= high:
         raise ConfigError(f"{PREFIX}{name} must be between {low} and {high}")
     return number
+
+
+def parse_bind(value: str) -> tuple[str, int]:
+    """'host:port' (or '[::1]:port') as (host, port). Raises ConfigError naming API_BIND."""
+    host, sep, port_text = value.rpartition(":")
+    host = host.strip("[]")
+    if not sep or not host or not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+        raise ConfigError(f"{PREFIX}API_BIND must look like 127.0.0.1:8098 (host:port, port 1 to 65535)")
+    return host, int(port_text)
+
+
+def is_loopback(host: str) -> bool:
+    """True for localhost and loopback addresses. A host name other than localhost counts as not loopback."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def token_problem(token: str) -> str | None:
+    """Why `serve` will not start with this token, or None when it is fine."""
+    if not token:
+        return f"{PREFIX}API_TOKEN is not set. Make a long random one (for example `openssl rand -hex 32`)."
+    if len(token) < TOKEN_MIN:
+        return f"{PREFIX}API_TOKEN is too short: use at least {TOKEN_MIN} characters (`openssl rand -hex 32`)."
+    if not all(33 <= ord(c) <= 126 for c in token):
+        return f"{PREFIX}API_TOKEN must be printable ASCII with no spaces."
+    return None
 
 
 def from_env(env: dict[str, str]) -> Config:
@@ -115,6 +153,9 @@ def from_env(env: dict[str, str]) -> Config:
     keep_days = _whole(get("KEEP_DAYS", "30"), "KEEP_DAYS", 1, 365)
     max_removals = _whole(get("MAX_REMOVALS_PER_ROUND", "25"), "MAX_REMOVALS_PER_ROUND", 1, 10000)
 
+    bind = get("API_BIND", DEFAULT_BIND)
+    parse_bind(bind)  # a bad address stops the app at start-up like any other setting
+
     # Safe by default: nothing changes anything until the person sets DRY_RUN=false.
     return Config(
         url,
@@ -131,4 +172,6 @@ def from_env(env: dict[str, str]) -> Config:
         get("STATE_FILE", "/data/state.json"),
         _truthy(get("ALLOW_SHRINK", "false"), "ALLOW_SHRINK"),
         _truthy(get("ADOPT", "false"), "ADOPT"),
+        get("API_TOKEN"),
+        bind,
     )

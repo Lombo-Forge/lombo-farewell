@@ -14,6 +14,23 @@ services:
       - ./data:/data   # state file; with SOURCE=file also put your list here (SOURCE_FILE=/data/leaving.txt)
     # If Jellyfin and Maintainerr are in another compose project, join its network:
     # networks: [media]
+
+  # Optional: the HTTP API (docs/security.md). Same image and .env, plus LOMBO_FAREWELL_API_TOKEN in .env.
+  # Another container (your reverse proxy) reaches it as http://lombo-farewell-api:8098 on a PRIVATE network.
+  # Never add `ports:` here. Binding 0.0.0.0 inside the container is only safe because nothing is published.
+  # lombo-farewell-api:
+  #   image: ghcr.io/lombo-forge/lombo-farewell:latest
+  #   container_name: lombo-farewell-api
+  #   restart: unless-stopped
+  #   command: ["serve"]
+  #   env_file: .env
+  #   environment:
+  #     LOMBO_FAREWELL_API_BIND: "0.0.0.0:8098"
+  #   read_only: true
+  #   mem_limit: 128m
+  #   volumes:
+  #     - ./data:/data   # the same folder as above: the keep limits live in the state file
+  #   networks: [media]   # the network your reverse proxy is on
 # networks:
 #   media:
 #     external: true

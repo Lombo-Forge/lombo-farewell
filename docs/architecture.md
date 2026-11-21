@@ -35,7 +35,10 @@ Jellyfin <-- jellyfin.py <-- engine.py --> core.py (decides)
 | `jellyfin.Jellyfin` | URL, key | `find_collection`, `collection_members`, `create_collection`, `add_to_collection`, `remove_from_collection`, `names`, `ids_named`. Raises `JellyfinError`. |
 | `engine.build_entries(source, jf, now)` | | `(entries, skipped notes)` |
 | `engine.sync(jf, cfg, entries, apply)` | | `SyncReport`; with `apply=False` nothing is written |
-| `state` | a JSON file | `kept` titles and `alerted` ids; a damaged file means "start fresh" |
+| `state` | a JSON file | `kept` titles and `alerted` ids; a damaged file means "start fresh". Also writes `leaving.json` (the contract in [contracts.md](contracts.md)). |
+| `core.leaving_rows(entries, kept, now, keep_days)` | entries, the `kept` notes | the rows of `leaving.json` and `GET /v1/leaving`; `can_keep` includes the keep limit |
+| `cli.keep_title(cfg, query, now)` | | `(done, message)`: the one keep rule, used by `keep` and the API (caller holds the run lock) |
+| `api.make_server(cfg, keep, leaving)` | two functions from `cli.py` | an HTTP server (not started). Only HTTP, auth and limits live here; see [security.md](security.md) |
 
 A **source** is the adapter point. Anything that can produce `Candidate` values (a Jellyfin id or a title, a deletion time if known, and the wait in days if it can postpone) can be a source.
 
@@ -46,7 +49,7 @@ A **source** is the adapter point. Anything that can produce `Candidate` values 
 | Plan from Maintainerr collections: `deleteAfterDays` after `addDate`, soonest first, one entry per title, `can_keep` only inside the normal wait | kept as is (`core.plan`, `sources.maintainerr_candidates`) |
 | Collection "holds exactly" the list; adds first, then removes, in batches of 50 | kept; plus a removal cap per round, no reordering, and no empty collection is ever created |
 | Overdue title (2+ days) alerted once, forgotten when it leaves | kept (`core.overdue_to_alert`) |
-| "Keep it longer" button in a page script, answered by a server, with a lock | `lombo-farewell keep`, one process at a time by nature; no server, no script |
+| "Keep it longer" button in a page script, answered by a server, with a lock | `lombo-farewell keep` (one process at a time, by the run lock) and the optional `lombo-farewell serve` API for a page to call; the script itself is not part of this app |
 | Per-title labels ("Gone Friday") drawn by the page script | dropped: no script; dates are in `plan` |
 | Database for keeps and alert memory | a small JSON state file |
 | Maintainerr only | Maintainerr or a list file |

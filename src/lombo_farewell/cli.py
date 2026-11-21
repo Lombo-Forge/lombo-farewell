@@ -4,6 +4,7 @@ lombo-farewell doctor        check the settings, Jellyfin and the source; exit 1
 lombo-farewell plan          show what would happen; changes nothing, ever
 lombo-farewell run [--loop]  mirror the list into the collection (only when DRY_RUN=false)
 lombo-farewell keep TITLE    postpone one title's deletion by KEEP_DAYS (only when DRY_RUN=false)
+lombo-farewell serve         small HTTP API: GET /v1/leaving, POST /v1/keep, GET /v1/health (needs API_TOKEN)
 
 It never deletes a title or a file. If the source cannot be read the collection is left as it is.
 """
@@ -14,11 +15,16 @@ import sys
 import time
 from collections.abc import Callable
 
-from . import __version__, core, engine, notify, state
-from .config import PREFIX, SETTINGS, Config, ConfigError, from_env
+from . import __version__, api, core, engine, notify, state
+from .config import PREFIX, SETTINGS, Config, ConfigError, from_env, is_loopback, parse_bind, token_problem
 from .engine import Source
 from .jellyfin import Jellyfin, JellyfinError
 from .sources import SourceError
+
+NON_LOOPBACK = (
+    "LOMBO_FAREWELL_API_BIND is not a loopback address, so other machines can reach the API. Keep it on a private "
+    "network and put your reverse proxy in front (examples/); never publish the port."
+)
 
 Failure = (JellyfinError, SourceError, notify.NotifyError, state.StateError)
 
@@ -68,6 +74,16 @@ def doctor(cfg: Config) -> int:
             ok = False
     keep_note = "" if source.can_postpone else " (the file source cannot postpone, so `keep` is refused)"
     print(f"[ ok ] keep it longer: {cfg.keep_days} days{keep_note}")
+    problem = token_problem(cfg.api_token)
+    if cfg.api_token and problem:
+        print(f"[FAIL] API token: {problem}")
+        ok = False
+    elif problem:
+        print("[ ok ] API: off (no LOMBO_FAREWELL_API_TOKEN, so `serve` will not start)")
+    else:
+        print(f"[ ok ] API: `serve` would listen on {cfg.api_bind}")
+    if problem is None and not is_loopback(parse_bind(cfg.api_bind)[0]):
+        print(f"[warn] API bind: {NON_LOOPBACK}")
     print(f"[ ok ] webhook: {'set' if cfg.webhook_url else 'not set (alerts are skipped)'}")
     print(f"[ ok ] mode: {'dry run (nothing is changed)' if cfg.dry_run else 'LIVE'}")
     return 0 if ok else 1
@@ -157,6 +173,11 @@ def _run_locked(cfg: Config, now: float) -> int:
             remembered.discard(e.item_id)  # try again next round
     saved["alerted"] = sorted(remembered)
     state.save(cfg.state_file, saved)
+    try:  # a view for other apps (docs/contracts.md): a failure here never fails the round
+        rows = core.leaving_rows(entries, saved["kept"], now, cfg.keep_days)
+        state.save_leaving(cfg.state_file, rows, now)
+    except state.StateError as err:
+        print(f"[warn] {err}", file=sys.stderr)
     return 0
 
 
@@ -166,34 +187,73 @@ def keep(cfg: Config, query: str, now: float | None = None) -> int:
 
 
 def _keep_locked(cfg: Config, query: str, now: float) -> int:
+    done, message = keep_title(cfg, query, now)
+    print(message if done else f"[FAIL] {message}", file=sys.stdout if done else sys.stderr)
+    return 0 if done else 1
+
+
+def keep_title(cfg: Config, query: str, now: float) -> tuple[bool, str]:
+    """The one keep rule, shared by `keep` and the API: (done, message). Caller holds the run lock.
+
+    A refusal is (False, why). A source, Jellyfin or state-file failure raises, as it always did.
+    """
     jf = Jellyfin(cfg.jellyfin_url, cfg.jellyfin_api_key)
     source: Source = engine.make_source(cfg)
     if not source.can_postpone:
-        print(f"[FAIL] SOURCE={cfg.source} cannot postpone a deletion. Edit the list instead.", file=sys.stderr)
-        return 1
+        return False, f"SOURCE={cfg.source} cannot postpone a deletion. Edit the list instead."
     entries, _ = engine.build_entries(source, jf, now)
     entry, why = core.find(entries, query)
     if entry is None:
-        print(f"[FAIL] {why}", file=sys.stderr)
-        return 1
+        return False, why
     saved = state.load(cfg.state_file)
     if core.keep_check(entry, saved["kept"].get(entry.item_id), now, cfg.keep_days) != "ok":
-        print(
-            f"[FAIL] {core.clean(entry.title)} was already kept; it can be kept again when its extra time is "
-            f"nearly used up, and at most once every {cfg.keep_days} days.",
-            file=sys.stderr,
+        return False, (
+            f"{core.clean(entry.title)} was already kept; it can be kept again when its extra time is "
+            f"nearly used up, and at most once every {cfg.keep_days} days."
         )
-        return 1
     if entry.group is None or entry.media_id is None:  # pragma: no cover - Maintainerr entries always carry both
-        print(f"[FAIL] {entry.title} has no postpone reference.", file=sys.stderr)
-        return 1
+        return False, f"{core.clean(entry.title)} has no postpone reference."
     if cfg.dry_run:
-        print(f"Dry run: would keep {core.clean(entry.title)} for {cfg.keep_days} more days. Nothing was changed.")
-        return 0
+        return (
+            True,
+            f"Dry run: would keep {core.clean(entry.title)} for {cfg.keep_days} more days. Nothing was changed.",
+        )
     until = source.postpone(entry.group, entry.media_id, cfg.keep_days)
     saved["kept"][entry.item_id] = {"title": entry.title, "at": now, "until": until}
     state.save(cfg.state_file, saved)
-    print(f"Kept {core.clean(entry.title)}: it now leaves on {_day(until)}.")
+    return True, f"Kept {core.clean(entry.title)}: it now leaves on {_day(until)}."
+
+
+def leaving_now(cfg: Config, now: float) -> dict[str, object]:
+    """The leaving list as it is right now (what the API returns). Reads only; raises on a failed read."""
+    entries, _ = engine.build_entries(engine.make_source(cfg), Jellyfin(cfg.jellyfin_url, cfg.jellyfin_api_key), now)
+    rows = core.leaving_rows(entries, state.load(cfg.state_file)["kept"], now, cfg.keep_days)
+    return state.leaving_document(rows, now)
+
+
+def serve(cfg: Config) -> int:
+    """Run the HTTP API until stopped. Refuses to start without a good token."""
+    problem = token_problem(cfg.api_token)
+    if problem:
+        print(f"[FAIL] serve: {problem}", file=sys.stderr)
+        return 2
+    host = parse_bind(cfg.api_bind)[0]
+
+    def keep_request(title: str) -> tuple[bool, str]:
+        with state.locked(cfg.state_file):
+            return keep_title(cfg, title, time.time())
+
+    server = api.make_server(cfg, keep_request, lambda: leaving_now(cfg, time.time()))
+    if not is_loopback(host):
+        print(f"[WARN] {NON_LOOPBACK}", file=sys.stderr)
+    mode = "dry run: a keep changes nothing" if cfg.dry_run else "LIVE: a keep postpones a deletion"
+    print(f"lombo-farewell API on {cfg.api_bind} ({mode})", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 
@@ -205,6 +265,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor")
     sub.add_parser("plan")
+    sub.add_parser("serve")
     run = sub.add_parser("run")
     run.add_argument("--loop", action="store_true")
     kp = sub.add_parser("keep")
@@ -228,6 +289,8 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
             return plan(cfg)
         if args.cmd == "keep":
             return keep(cfg, args.title)
+        if args.cmd == "serve":
+            return serve(cfg)
         while True:
             try:
                 run_once(cfg)
