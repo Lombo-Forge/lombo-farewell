@@ -10,8 +10,11 @@ It never deletes a title or a file. If the source cannot be read the collection 
 """
 
 import argparse
+import json
 import os
+import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 
@@ -181,15 +184,48 @@ def _run_locked(cfg: Config, now: float) -> int:
     return 0
 
 
+_pending = threading.local()  # the title a keep in this thread really postponed, until post_keep() has run
+
+
+def post_keep(cfg: Config) -> str | None:
+    """Run the optional post-keep command for the keep this thread just made. Call it after the run lock is
+    released. Returns a short note when the command failed, else None. Does nothing when no title was
+    postponed (a refusal, a dry run) or no command is set. It never raises and never logs the environment."""
+    kept = getattr(_pending, "kept", None)
+    _pending.kept = None
+    if kept is None or not cfg.post_keep_command:
+        return None
+    env = {**os.environ, "LOMBO_FAREWELL_KEPT_JSON": json.dumps({"id": kept[0], "title": kept[1]})}
+    try:
+        done = subprocess.run(  # noqa: S603 - no shell; the command is the owner's own setting
+            list(cfg.post_keep_command),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as err:
+        problem = f"post-keep command failed ({type(err).__name__})"
+    else:
+        if done.returncode == 0:
+            return None
+        problem = f"post-keep command failed (exit {done.returncode})"
+    print(f"[warn] {problem}", file=sys.stderr, flush=True)
+    return problem
+
+
 def keep(cfg: Config, query: str, now: float | None = None) -> int:
     with state.locked(cfg.state_file):
-        return _keep_locked(cfg, query, time.time() if now is None else now)
+        code, message = _keep_locked(cfg, query, time.time() if now is None else now)
+    print(message if code == 0 else f"[FAIL] {message}", file=sys.stdout if code == 0 else sys.stderr)
+    post_keep(cfg)  # after the lock is released: a slow command never holds up a run; a failure is a [warn] line
+    return code
 
 
-def _keep_locked(cfg: Config, query: str, now: float) -> int:
+def _keep_locked(cfg: Config, query: str, now: float) -> tuple[int, str]:
     done, message = keep_title(cfg, query, now)
-    print(message if done else f"[FAIL] {message}", file=sys.stdout if done else sys.stderr)
-    return 0 if done else 1
+    return (0 if done else 1), message
 
 
 def keep_title(cfg: Config, query: str, now: float) -> tuple[bool, str]:
@@ -197,6 +233,7 @@ def keep_title(cfg: Config, query: str, now: float) -> tuple[bool, str]:
 
     A refusal is (False, why). A source, Jellyfin or state-file failure raises, as it always did.
     """
+    _pending.kept = None
     jf = Jellyfin(cfg.jellyfin_url, cfg.jellyfin_api_key)
     source: Source = engine.make_source(cfg)
     if not source.can_postpone:
@@ -221,6 +258,7 @@ def keep_title(cfg: Config, query: str, now: float) -> tuple[bool, str]:
     until = source.postpone(entry.group, entry.media_id, cfg.keep_days)
     saved["kept"][entry.item_id] = {"title": entry.title, "at": now, "until": until}
     state.save(cfg.state_file, saved)
+    _pending.kept = (core.norm_id(entry.item_id), core.clean(entry.title))
     return True, f"Kept {core.clean(entry.title)}: it now leaves on {_day(until)}."
 
 
@@ -243,7 +281,9 @@ def serve(cfg: Config) -> int:
         with state.locked(cfg.state_file):
             return keep_title(cfg, title, time.time())
 
-    server = api.make_server(cfg, keep_request, lambda: leaving_now(cfg, time.time()))
+    server = api.make_server(
+        cfg, keep_request, lambda: leaving_now(cfg, time.time()), after_keep=lambda: post_keep(cfg)
+    )
     if not is_loopback(host):
         print(f"[WARN] {NON_LOOPBACK}", file=sys.stderr)
     mode = "dry run: a keep changes nothing" if cfg.dry_run else "LIVE: a keep postpones a deletion"

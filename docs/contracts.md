@@ -4,6 +4,7 @@
 
 - [The leaving list (`leaving.json` and `GET /v1/leaving`)](#the-leaving-list)
 - [The keep call (`POST /v1/keep`)](#the-keep-call)
+- [The post-keep command](#the-post-keep-command)
 - [Other routes and status codes](#other-routes-and-status-codes)
 - [What a version bump means](#what-a-version-bump-means)
 
@@ -57,6 +58,24 @@ as `lombo-farewell keep`, and returns `{"ok": true|false, "message": "..."}`.
 | 422 | Refused by a rule: no such title, several match, already kept, cannot postpone with this source. `ok` is `false`; the message says why. |
 | 502 | Jellyfin, Maintainerr or the state file could not be used. Nothing was changed. The message is generic; the log has the detail. |
 | 400, 411, 413, 415 | The request itself was wrong: not strict JSON or wrong shape, no `Content-Length`, body over 4096 bytes, not `application/json`. |
+
+## The post-keep command
+
+- **Name:** `LOMBO_FAREWELL_POST_KEEP_COMMAND`. Empty (the default) means off.
+- **When it runs:** once after a keep that really postponed a title, from `lombo-farewell keep` and from
+  `POST /v1/keep`. Never in a dry run, never when the keep is refused or fails. It runs after the run lock is
+  released.
+- **How:** split with `shlex`, started without a shell, no input, output dropped, 60 second limit.
+- **What it gets:** the normal environment plus `LOMBO_FAREWELL_KEPT_JSON`:
+
+```json
+{"id": "0123456789abcdef0123456789abcdef", "title": "Alpha Movie"}
+```
+
+  `id` is the Jellyfin item id (32 lower-case hex digits, no dashes); `title` is the cleaned title.
+- **Failure never fails the action:** a non-zero exit, a timeout or a command that cannot start gives a note and
+  nothing else changes. The CLI prints `[warn] post-keep command failed (exit 1)` to standard error and still exits
+  0. The API still answers `200` with `"ok": true`, and `message` ends with `Note: post-keep command failed (exit 1).`
 
 ## Other routes and status codes
 

@@ -82,6 +82,8 @@ lombo-farewell keep "Alpha Movie"      # a unique part of the name works too
 
 It asks the source to push the deletion back by `KEEP_DAYS` days and notes in the state file that it was kept, and until when. Rules carried over from the original: a title can be kept only while it is inside its normal wait, and (from the state file) at most once every `KEEP_DAYS` days, so running the command twice in a row does nothing the second time; once the extra time is nearly used up it can be kept again. The state file is what remembers the last keep: if it is deleted, the limit starts over. By default there is no viewer-facing way to run `keep`; do not wire the command to a chat bot that viewers can use. Anything unclear (unknown title, two titles that match, source down) does nothing and says why.
 
+**Post-keep command.** Set `LOMBO_FAREWELL_POST_KEEP_COMMAND` (empty = off) to run a command once after a keep that really postponed a title, from the CLI `keep` or from `POST /v1/keep`. It is started without a shell and gets `LOMBO_FAREWELL_KEPT_JSON` in its environment: `{"id": "<32 hex>", "title": "<clean title>"}`. It never runs in a dry run or when a keep is refused. It has 60 seconds. If it fails, the keep still counts: the CLI prints a `[warn] post-keep command failed (exit 1)` line and the API answer's message ends with `Note: post-keep command failed (exit 1).` See [docs/contracts.md](docs/contracts.md) and [docs/security.md](docs/security.md).
+
 ### The HTTP API (optional)
 
 The original had a "Keep it longer" button on the title's page, drawn by a script in the web client and answered by a server. This app does not draw buttons, but `lombo-farewell serve` is the server half: a small standard-library HTTP server with three routes and nothing else.
