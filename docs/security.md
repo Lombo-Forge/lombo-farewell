@@ -6,6 +6,7 @@
 - [What it trusts](#what-it-trusts)
 - [What it refuses](#what-it-refuses)
 - [What it never logs](#what-it-never-logs)
+- [The post-keep command](#the-post-keep-command)
 - [Reaching it from a web page](#reaching-it-from-a-web-page)
 - [Limits of this design](#limits-of-this-design)
 - [The state files](#the-state-files)
@@ -42,6 +43,18 @@ postponement through the cleanup tool, the same one `lombo-farewell keep` makes.
 ## What it never logs
 
 It prints one line per request to standard error: the client address, the method, the path (cleaned, 60 characters at most) and the status. Never the `Authorization` header, never the query string, never a request body, never the token. For a keep it also logs the requested title (cleaned, 60 characters at most), which a viewer typed or a page sent. An upstream error is logged by its message (which names the failing call, not a key); an unexpected error only by its type.
+
+## The post-keep command
+
+`LOMBO_FAREWELL_POST_KEEP_COMMAND` is the owner's own setting, like the rest of the environment, so it is run as
+given. It is split like a shell would split it but started without a shell: no pipes, no `$VAR`, no globbing. It runs
+as the same user as the app, with the app's environment plus `LOMBO_FAREWELL_KEPT_JSON` (the title's Jellyfin id and
+its cleaned name). Both are already visible to anyone who can call `keep`, but the title text came from Jellyfin, so
+a command must never paste it into a shell line. It gets no input, its output is thrown away and it is stopped after
+60 seconds. It runs only after a keep that really postponed a title (never in a dry run, never for a refusal), after
+the run lock is released, so it cannot hold the lock. A failure never fails the keep. The app never logs the
+command's environment, only a short note such as `post-keep command failed (exit 1)`. An unbalanced quote is a
+start-up error that names the variable.
 
 ## Reaching it from a web page
 

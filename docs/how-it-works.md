@@ -41,6 +41,8 @@ The collection (`COLLECTION_NAME`, locked, made on the first live run) should ho
 2. Refuses if nothing or more than one title matches, or if the title is already kept (its date is beyond the normal wait, or it was kept less than `KEEP_DAYS` days ago according to the state file).
 3. With `DRY_RUN=true`, says what it would do and stops.
 4. Otherwise asks Maintainerr to postpone that title by `KEEP_DAYS` days and writes down the new date.
+5. Releases the run lock, then, if `POST_KEEP_COMMAND` is set, runs it once (60 seconds at most). A slow command
+   therefore never holds up a round or another keep. If it fails, the keep still counts and a short note says so.
 
 The title stays in the collection until it is really gone; Jellyfin shows no per-title date, so check `plan`.
 

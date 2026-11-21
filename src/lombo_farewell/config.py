@@ -5,6 +5,7 @@ A bad value stops the app at start-up with a message that names the variable.
 """
 
 import ipaddress
+import shlex
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -28,6 +29,7 @@ SETTINGS = (
     "ADOPT",
     "API_TOKEN",
     "API_BIND",
+    "POST_KEEP_COMMAND",
 )
 
 TOKEN_MIN = 24
@@ -58,6 +60,7 @@ class Config:
     adopt: bool = False  # let this tool manage a collection it did not make
     api_token: str = ""  # `serve` needs it (see token_problem); empty means the API is off
     api_bind: str = DEFAULT_BIND  # host:port `serve` listens on
+    post_keep_command: tuple[str, ...] = ()  # run once after a keep that postponed a title; empty = off
 
 
 def _truthy(value: str, name: str) -> bool:
@@ -156,6 +159,11 @@ def from_env(env: dict[str, str]) -> Config:
     bind = get("API_BIND", DEFAULT_BIND)
     parse_bind(bind)  # a bad address stops the app at start-up like any other setting
 
+    try:
+        post_keep = tuple(shlex.split(get("POST_KEEP_COMMAND")))
+    except ValueError as e:
+        raise ConfigError(f"{PREFIX}POST_KEEP_COMMAND is not a valid command: {e}") from None
+
     # Safe by default: nothing changes anything until the person sets DRY_RUN=false.
     return Config(
         url,
@@ -174,4 +182,5 @@ def from_env(env: dict[str, str]) -> Config:
         _truthy(get("ADOPT", "false"), "ADOPT"),
         get("API_TOKEN"),
         bind,
+        post_keep,
     )

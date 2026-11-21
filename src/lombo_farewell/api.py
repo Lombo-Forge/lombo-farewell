@@ -106,8 +106,12 @@ def make_server(
     bind: tuple[str, int] | None = None,
     clock: Callable[[], float] = time.monotonic,
     log: Callable[[str], None] | None = None,
+    after_keep: Callable[[], str | None] | None = None,
 ) -> ThreadingHTTPServer:
-    """Build the server (not started). `bind` overrides API_BIND (tests use port 0)."""
+    """Build the server (not started). `bind` overrides API_BIND (tests use port 0).
+
+    `after_keep` runs after a keep that went through, once the keep lock is released (so a slow command cannot
+    hold it). If it returns a short note, the note is added to the answer's message."""
     token = cfg.api_token.encode()
     limiter = FailureLimiter(clock)
     one_keep = threading.Lock()  # one keep at a time, on top of the run lock shared with `run` and `keep`
@@ -187,6 +191,8 @@ def make_server(
             say(f"[api] keep requested for {core.clean(title)[:60]!r}")
             with one_keep:
                 done, message = keep(title)
+            if done and after_keep and (note := after_keep()):
+                message = f"{message} Note: {note}."
             return (200 if done else 422), {"ok": done, "message": message}, None
 
         do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _dispatch
