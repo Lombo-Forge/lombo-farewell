@@ -18,7 +18,7 @@ independent review, and it was never run against a real reverse proxy or a real 
 
 A small server built on Python's `http.server`, started only when you run `lombo-farewell serve`. It listens on
 `LOMBO_FAREWELL_API_BIND` (default `127.0.0.1:8098`), speaks plain HTTP (no TLS: put it behind a proxy that does TLS),
-and has three routes: `GET /v1/leaving`, `POST /v1/keep`, `GET /v1/health`. The only thing it can change is a keep: a
+and has four routes: `GET /v1/leaving`, `GET /v1/keeps`, `POST /v1/keep`, `GET /v1/health`. The only thing it can change is a keep: a
 postponement through the cleanup tool, the same one `lombo-farewell keep` makes. It cannot delete anything.
 
 ## What it trusts
@@ -33,8 +33,8 @@ postponement through the cleanup tool, the same one `lombo-farewell keep` makes.
 - Starting without a token, or with one shorter than 24 characters, or with spaces or non-ASCII characters.
 - Every request without the right `Authorization: Bearer` header (`401`, no detail). The token is compared in constant time.
 - More than 10 failed tries a minute from one address (`429`); the limit is checked before the token is, so it slows a guesser who happens to be right too. The table of addresses is capped at 1024.
-- Any path other than the three routes (`404`) and any other method (`405`), after the token is checked, so a stranger learns nothing about the routes.
-- A body over 4096 bytes, a missing `Content-Length` (no chunked bodies), a content type other than `application/json`, anything but strict JSON of exactly the shape `{"title": "..."}`: duplicate keys, `NaN`, extra keys, a non-string, a title that is empty, over 200 characters or holds control characters.
+- Any path other than the four routes (`404`) and any other method (`405`), after the token is checked, so a stranger learns nothing about the routes.
+- A body over 4096 bytes, a missing `Content-Length` (no chunked bodies), a content type other than `application/json`, anything but strict JSON of the shape `{"title": "..."}` with an optional `"by": "..."` (1 to 60 printable characters): duplicate keys, `NaN`, extra keys, a non-string, a title that is empty, over 200 characters or holds control characters.
 - Requests that stall: a connection that does not finish its request in 10 seconds is dropped.
 - More than one keep at a time: keeps wait for each other, and for a running `run` or `keep` (the shared run lock).
 - To do anything in dry run: a keep says what it would do and changes nothing.
@@ -68,8 +68,11 @@ If the API is not behind a proxy that overwrites the header, a visitor can send 
 
 ## Limits of this design
 
-- **The token authenticates the proxy, not the viewer.** Once the proxy adds the token for a path, anyone who can open that path can postpone a deletion. The existing keep rules still apply (only inside the normal wait, at most once every `KEEP_DAYS` days per title), so the worst a visitor can do is postpone every title once per period. Put the path behind the same login as the rest of your server (your proxy's own authentication, or a network that only your household can reach), or accept that.
-- **No TLS, no sessions, no per-person identity.** A keep is not attributed to anyone.
+- **The token authenticates the proxy, not the viewer.** Once the proxy adds the token for a path, anyone who can open that path can postpone a deletion. The existing keep rules still apply (only inside the normal wait, at most once every `KEEP_DAYS` days per title), so the worst a visitor can do is postpone every title once per period. `MAX_KEEPS_PER_PERSON` and `MAX_KEEPS_PER_TITLE` (off by default) cap that further; the first needs a trustworthy `by` (next point). Put the path behind the same login as the rest of your server (your proxy's own authentication, or a network that only your household can reach), or accept that.
+- **No TLS, no sessions, no per-person identity.** A keep is attributed only to the `by` name that the caller sends,
+  and the app cannot check it. Your proxy or admin page must take the name from the viewer's own signed-in session
+  and never from something the viewer typed; otherwise `MAX_KEEPS_PER_PERSON` can be dodged by changing the name.
+  Without `by`, a keep is recorded as nobody's and is not counted for any person.
 - **A non-loopback bind.** Inside a container you must bind `0.0.0.0` for another container to reach it; `doctor` and `serve` then print a warning. That is acceptable only on a private container network with no published port.
 - **IPv6** binds (`[::1]:8098`) are supported by the code but were not tried.
 - **The failure limit is per address**, so it cannot stop a distributed guess. A 32-character random token (`openssl rand -hex 32`) is what protects you.
@@ -78,4 +81,4 @@ If the API is not behind a proxy that overwrites the header, a visitor can send 
 
 ## The state files
 
-`state.json` (kept titles, overdue alerts, the owned collection id) is written with mode 0600. `leaving.json` is written with mode 0644 on purpose, because it holds titles only and other apps read it (see [contracts.md](contracts.md)). Neither holds the token or the Jellyfin key. Both are replaced atomically (temporary name, flush, rename).
+`state.json` (kept titles, overdue and deleting-soon alerts, the owned collection id) is written with mode 0600. `leaving.json` and `keeps.json` are written with mode 0644 on purpose, because other apps read them (see [contracts.md](contracts.md)); they hold titles, dates and the names given as `by` (who kept what), so on a machine shared with people you do not trust, put the data folder somewhere they cannot read. Neither holds the token or the Jellyfin key. Both are replaced atomically (temporary name, flush, rename).

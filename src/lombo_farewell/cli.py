@@ -3,8 +3,10 @@
 lombo-farewell doctor        check the settings, Jellyfin and the source; exit 1 on any failure
 lombo-farewell plan          show what would happen; changes nothing, ever
 lombo-farewell run [--loop]  mirror the list into the collection (only when DRY_RUN=false)
-lombo-farewell keep TITLE    postpone one title's deletion by KEEP_DAYS (only when DRY_RUN=false)
-lombo-farewell serve         small HTTP API: GET /v1/leaving, POST /v1/keep, GET /v1/health (needs API_TOKEN)
+lombo-farewell keep TITLE [--by NAME]
+                             postpone one title's deletion by KEEP_DAYS (only when DRY_RUN=false)
+lombo-farewell serve         small HTTP API: GET /v1/leaving, GET /v1/keeps, POST /v1/keep, GET /v1/health
+                             (needs API_TOKEN)
 
 It never deletes a title or a file. If the source cannot be read the collection is left as it is.
 """
@@ -77,6 +79,14 @@ def doctor(cfg: Config) -> int:
             ok = False
     keep_note = "" if source.can_postpone else " (the file source cannot postpone, so `keep` is refused)"
     print(f"[ ok ] keep it longer: {cfg.keep_days} days{keep_note}")
+    per_person = (
+        f"{cfg.max_keeps_per_person} per person per {cfg.keep_days} days" if cfg.max_keeps_per_person else "none"
+    )
+    per_title = f"{cfg.max_keeps_per_title} per title" if cfg.max_keeps_per_title else "none"
+    print(f"[ ok ] keep limits: {per_person}; {per_title}")
+    alerts = [n for n, on in (("on keep", cfg.alert_on_keep), ("deleting soon", cfg.alert_deleting_soon)) if on]
+    if alerts and not cfg.webhook_url:
+        print(f"[warn] alerts ({', '.join(alerts)}) are on but LOMBO_FAREWELL_WEBHOOK_URL is not set")
     problem = token_problem(cfg.api_token)
     if cfg.api_token and problem:
         print(f"[FAIL] API token: {problem}")
@@ -175,6 +185,18 @@ def _run_locked(cfg: Config, now: float) -> int:
             print(f"[FAIL] {err}", file=sys.stderr)
             remembered.discard(e.item_id)  # try again next round
     saved["alerted"] = sorted(remembered)
+    if cfg.alert_deleting_soon:
+        soon, warned = core.due_to_warn(entries, set(saved["warned"]))
+        for e in soon:
+            text = f"{core.clean(e.title)} is deleted within a day. Keep it now if someone still wants it."
+            try:
+                if cfg.webhook_url:
+                    notify.send(cfg.webhook_url, text)
+                print(f"deleting soon: {core.clean(str(e))}")
+            except notify.NotifyError as err:
+                print(f"[FAIL] {err}", file=sys.stderr)
+                warned.discard(e.item_id)  # try again next round
+        saved["warned"] = sorted(warned)
     state.save(cfg.state_file, saved)
     try:  # a view for other apps (docs/contracts.md): a failure here never fails the round
         rows = core.leaving_rows(entries, saved["kept"], now, cfg.keep_days)
@@ -184,18 +206,25 @@ def _run_locked(cfg: Config, now: float) -> int:
     return 0
 
 
-_pending = threading.local()  # the title a keep in this thread really postponed, until post_keep() has run
+_pending = threading.local()  # the keep this thread really made, until post_keep() has run
 
 
 def post_keep(cfg: Config) -> str | None:
-    """Run the optional post-keep command for the keep this thread just made. Call it after the run lock is
-    released. Returns a short note when the command failed, else None. Does nothing when no title was
-    postponed (a refusal, a dry run) or no command is set. It never raises and never logs the environment."""
+    """Run the optional post-keep command and send the optional keep alert for the keep this thread just made.
+    Call it after the run lock is released. Returns a short note when one of them failed, else None. Does nothing
+    when no title was postponed (a refusal, a dry run). It never raises and never logs the environment."""
     kept = getattr(_pending, "kept", None)
     _pending.kept = None
-    if kept is None or not cfg.post_keep_command:
+    if kept is None:
         return None
-    env = {**os.environ, "LOMBO_FAREWELL_KEPT_JSON": json.dumps({"id": kept[0], "title": kept[1]})}
+    notes = [n for n in (_run_command(cfg, kept), _send_keep_alert(cfg, kept)) if n]
+    return "; ".join(notes) or None
+
+
+def _run_command(cfg: Config, kept: dict[str, object]) -> str | None:
+    if not cfg.post_keep_command:
+        return None
+    env = {**os.environ, "LOMBO_FAREWELL_KEPT_JSON": json.dumps(kept)}
     try:
         done = subprocess.run(  # noqa: S603 - no shell; the command is the owner's own setting
             list(cfg.post_keep_command),
@@ -215,21 +244,42 @@ def post_keep(cfg: Config) -> str | None:
     return problem
 
 
-def keep(cfg: Config, query: str, now: float | None = None) -> int:
+def _send_keep_alert(cfg: Config, kept: dict[str, object]) -> str | None:
+    if not (cfg.alert_on_keep and cfg.webhook_url):
+        return None
+    until = kept["until"]
+    who = kept["by"] or "Someone"
+    text = f"{who} kept {kept['title']}: it now leaves on {_day(until if isinstance(until, int | float) else None)}."
+    try:
+        notify.send(cfg.webhook_url, str(text))
+    except notify.NotifyError as err:
+        print(f"[warn] keep alert failed: {err}", file=sys.stderr, flush=True)
+        return "keep alert failed"
+    return None
+
+
+def keep(cfg: Config, query: str, now: float | None = None, by: str | None = None) -> int:
+    if by is not None and not core.valid_by(by):
+        print(
+            f"[FAIL] --by must be 1 to {core.MAX_BY} printable characters, with no spaces at either end",
+            file=sys.stderr,
+        )
+        return 2
     with state.locked(cfg.state_file):
-        code, message = _keep_locked(cfg, query, time.time() if now is None else now)
+        code, message = _keep_locked(cfg, query, time.time() if now is None else now, by)
     print(message if code == 0 else f"[FAIL] {message}", file=sys.stdout if code == 0 else sys.stderr)
     post_keep(cfg)  # after the lock is released: a slow command never holds up a run; a failure is a [warn] line
     return code
 
 
-def _keep_locked(cfg: Config, query: str, now: float) -> tuple[int, str]:
-    done, message = keep_title(cfg, query, now)
+def _keep_locked(cfg: Config, query: str, now: float, by: str | None) -> tuple[int, str]:
+    done, message = keep_title(cfg, query, now, by)
     return (0 if done else 1), message
 
 
-def keep_title(cfg: Config, query: str, now: float) -> tuple[bool, str]:
+def keep_title(cfg: Config, query: str, now: float, by: str | None = None) -> tuple[bool, str]:
     """The one keep rule, shared by `keep` and the API: (done, message). Caller holds the run lock.
+    `by` is who is keeping it (already checked with core.valid_by); it is recorded and counted for the limits.
 
     A refusal is (False, why). A source, Jellyfin or state-file failure raises, as it always did.
     """
@@ -250,15 +300,34 @@ def keep_title(cfg: Config, query: str, now: float) -> tuple[bool, str]:
         )
     if entry.group is None or entry.media_id is None:  # pragma: no cover - Maintainerr entries always carry both
         return False, f"{core.clean(entry.title)} has no postpone reference."
+    record = saved["kept"].get(entry.item_id)
+    history = state.load_keeps(cfg.state_file) if cfg.max_keeps_per_person else []
+    over = core.limit_problem(
+        by, record, history, now, cfg.keep_days, cfg.max_keeps_per_person, cfg.max_keeps_per_title
+    )
+    if over:
+        return False, f"{core.clean(entry.title)} cannot be kept: {over}."
     if cfg.dry_run:
         return (
             True,
             f"Dry run: would keep {core.clean(entry.title)} for {cfg.keep_days} more days. Nothing was changed.",
         )
     until = source.postpone(entry.group, entry.media_id, cfg.keep_days)
-    saved["kept"][entry.item_id] = {"title": entry.title, "at": now, "until": until}
+    who = core.clean(by) if by else None
+    count = record.get("count", 1) if record else 0
+    count = count + 1 if isinstance(count, int) and not isinstance(count, bool) else 1
+    saved["kept"][entry.item_id] = {"title": entry.title, "at": now, "until": until, "by": who, "count": count}
     state.save(cfg.state_file, saved)
-    _pending.kept = (core.norm_id(entry.item_id), core.clean(entry.title))
+    title = core.clean(entry.title)
+    _pending.kept = {"id": core.norm_id(entry.item_id), "title": title, "by": who, "until": int(until)}
+    try:  # the history and the view for other apps are extras: a failure here never undoes the keep
+        state.append_keep(
+            cfg.state_file, {"at": int(now), "id": _pending.kept["id"], "title": title, "by": who, "until": int(until)}
+        )
+        entries = [core.after_keep(e, until, now) if e.item_id == entry.item_id else e for e in entries]
+        state.save_leaving(cfg.state_file, core.leaving_rows(entries, saved["kept"], now, cfg.keep_days), now)
+    except state.StateError as err:
+        print(f"[warn] {err}", file=sys.stderr)
     return True, f"Kept {core.clean(entry.title)}: it now leaves on {_day(until)}."
 
 
@@ -277,12 +346,16 @@ def serve(cfg: Config) -> int:
         return 2
     host = parse_bind(cfg.api_bind)[0]
 
-    def keep_request(title: str) -> tuple[bool, str]:
+    def keep_request(title: str, by: str | None) -> tuple[bool, str]:
         with state.locked(cfg.state_file):
-            return keep_title(cfg, title, time.time())
+            return keep_title(cfg, title, time.time(), by)
 
     server = api.make_server(
-        cfg, keep_request, lambda: leaving_now(cfg, time.time()), after_keep=lambda: post_keep(cfg)
+        cfg,
+        keep_request,
+        lambda: leaving_now(cfg, time.time()),
+        after_keep=lambda: post_keep(cfg),
+        keeps=lambda: state.keeps_document(state.load_keeps(cfg.state_file)),
     )
     if not is_loopback(host):
         print(f"[WARN] {NON_LOOPBACK}", file=sys.stderr)
@@ -310,6 +383,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     run.add_argument("--loop", action="store_true")
     kp = sub.add_parser("keep")
     kp.add_argument("title", help="the title (or its Jellyfin id) to keep longer")
+    kp.add_argument("--by", help="who is keeping it; recorded, and counted for MAX_KEEPS_PER_PERSON")
     args = p.parse_args(argv)
 
     try:
@@ -328,7 +402,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         if args.cmd == "plan":
             return plan(cfg)
         if args.cmd == "keep":
-            return keep(cfg, args.title)
+            return keep(cfg, args.title, by=args.by)
         if args.cmd == "serve":
             return serve(cfg)
         while True:

@@ -27,7 +27,7 @@ It has not been run against a real Jellyfin or Maintainerr; the README lists wha
 | `src/lombo_farewell/jellyfin.py` | The Jellyfin client: collection calls and title lookups. |
 | `src/lombo_farewell/engine.py` | Gathers entries and applies the collection change. No printing, no clock. |
 | `src/lombo_farewell/httpjson.py` | One small JSON-over-HTTP helper used by both clients. |
-| `src/lombo_farewell/state.py` | The JSON state file (kept titles, overdue alerts). |
+| `src/lombo_farewell/state.py` | The JSON state file (kept titles, overdue alerts), `leaving.json` and the keep history `keeps.json`. |
 | `src/lombo_farewell/config.py` | Settings from `LOMBO_FAREWELL_*` environment variables; `SETTINGS` lists them all. |
 | `src/lombo_farewell/notify.py` | Webhook alerts. |
 | `src/lombo_farewell/api.py` | The optional HTTP API (`serve`): routes, token check, failure limit, body limits. Only HTTP; the rules come in as two functions from `cli.py`. Never logs the token or a body. Read `docs/security.md` before changing it. |

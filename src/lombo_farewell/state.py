@@ -3,6 +3,7 @@
 - `kept`: titles somebody asked to keep longer ({item_id: {"title", "at", "until"}}). A title is kept at most
   once per KEEP_DAYS, judged from `at`.
 - `alerted`: titles already reported as overdue, so a title is reported once.
+- `warned`: titles already reported as "deleted within a day" (only used with ALERT_DELETING_SOON).
 - `owned`: the id of the collection this tool made (or was told to adopt). Without it, an existing collection of
   the same name is left alone.
 
@@ -26,7 +27,7 @@ class StateError(Exception):
 
 
 def empty() -> dict[str, Any]:
-    return {"kept": {}, "alerted": [], "owned": None}
+    return {"kept": {}, "alerted": [], "warned": [], "owned": None}
 
 
 def load(path: str) -> dict[str, Any]:
@@ -40,6 +41,8 @@ def load(path: str) -> dict[str, Any]:
             out["kept"] = {k: v for k, v in data["kept"].items() if isinstance(v, dict)}
         if isinstance(data.get("alerted"), list):
             out["alerted"] = [x for x in data["alerted"] if isinstance(x, str)]
+        if isinstance(data.get("warned"), list):
+            out["warned"] = [x for x in data["warned"] if isinstance(x, str)]
         if isinstance(data.get("owned"), str):
             out["owned"] = data["owned"]
     return out
@@ -47,6 +50,37 @@ def load(path: str) -> dict[str, Any]:
 
 LEAVING_FILE = "leaving.json"
 LEAVING_VERSION = 1
+
+
+KEEPS_FILE = "keeps.json"
+KEEPS_VERSION = 1
+KEEPS_MAX = 500  # the newest keeps are kept; older ones are dropped when the file is rewritten
+
+
+def keeps_path(state_file: str) -> Path:
+    """`keeps.json` (the keep history) sits beside the state file."""
+    return Path(state_file).parent / KEEPS_FILE
+
+
+def load_keeps(state_file: str) -> list[dict[str, Any]]:
+    """The keep history, oldest first. A missing or damaged file means no history."""
+    try:
+        data = json.loads(keeps_path(state_file).read_text())
+    except (OSError, ValueError):
+        return []
+    rows = data.get("keeps") if isinstance(data, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def keeps_document(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The versioned shape of the keep history (docs/contracts.md); `GET /v1/keeps` returns the same."""
+    return {"version": KEEPS_VERSION, "keeps": rows}
+
+
+def append_keep(state_file: str, row: dict[str, Any]) -> None:
+    """Add one keep to the history (newest last, at most KEEPS_MAX). Caller holds the run lock."""
+    rows = [*load_keeps(state_file), row][-KEEPS_MAX:]
+    _write_atomic(str(keeps_path(state_file)), json.dumps(keeps_document(rows)), 0o644)
 
 
 def save(path: str, state: dict[str, Any]) -> None:

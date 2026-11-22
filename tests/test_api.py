@@ -45,6 +45,11 @@ class Client:
         return resp.status, got, out
 
 
+def legacy(entry):
+    """The four fields every reader of version 1 has had from the start."""
+    return {k: entry[k] for k in ("id", "title", "days_left", "can_keep")}
+
+
 @pytest.fixture
 def serve(env, fake):
     """Start the API the way `serve` does. Returns start(extra_env, clock, keep) -> Client."""
@@ -54,9 +59,9 @@ def serve(env, fake):
         cfg = from_env({**env, "LOMBO_FAREWELL_API_TOKEN": TOKEN, **(extra or {})})
         logs: list[str] = []
 
-        def real_keep(title):
+        def real_keep(title, by=None):
             with state.locked(cfg.state_file):
-                return cli.keep_title(cfg, title, time.time())
+                return cli.keep_title(cfg, title, time.time(), by)
 
         server = api.make_server(
             cfg,
@@ -65,6 +70,7 @@ def serve(env, fake):
             bind=("127.0.0.1", 0),
             clock=clock,
             log=logs.append,
+            keeps=lambda: state.keeps_document(state.load_keeps(cfg.state_file)),
         )
         threading.Thread(target=server.serve_forever, daemon=True).start()
         servers.append(server)
@@ -259,7 +265,7 @@ def test_leaving_returns_the_plan_soonest_first(serve, fake):
     status, _, body = serve().call("GET", "/v1/leaving")
     assert status == 200
     assert body["version"] == 1 and isinstance(body["updated"], int)
-    assert body["entries"] == [
+    assert [legacy(e) for e in body["entries"]] == [
         {"id": aid(1), "title": "Alpha Movie", "days_left": 1, "can_keep": True},
         {"id": aid(2), "title": "Beta Show", "days_left": 35, "can_keep": False},
     ]
@@ -323,7 +329,7 @@ def test_a_failed_postpone_is_502_and_records_nothing(serve, fake, env):
 
 
 def test_a_surprise_error_is_500_with_no_detail_and_the_server_lives_on(serve):
-    def boom(title):
+    def boom(title, by):
         raise RuntimeError("secret detail " + TOKEN)
 
     c = serve(keep=boom)
@@ -336,7 +342,7 @@ def test_a_surprise_error_is_500_with_no_detail_and_the_server_lives_on(serve):
 def test_keeps_are_served_one_at_a_time(serve):
     inside, worst, lock = [0], [0], threading.Lock()
 
-    def slow(title):
+    def slow(title, by):
         with lock:
             inside[0] += 1
             worst[0] = max(worst[0], inside[0])
@@ -355,7 +361,7 @@ def test_keeps_are_served_one_at_a_time(serve):
 
 
 def test_the_log_never_holds_the_token_or_a_whole_body(serve):
-    c = serve(keep=lambda title: (True, "ok"))
+    c = serve(keep=lambda title, by: (True, "ok"))
     c.call("GET", "/v1/health")
     c.call("GET", "/v1/health", token="guess-" + "g" * 30)
     c.call("POST", "/v1/keep", body={"title": "Some Title"})
@@ -374,7 +380,7 @@ def test_a_live_round_writes_the_versioned_state_file_atomically(env, fake):
     doc = json.loads(path.read_text())
     assert list(doc) == ["version", "updated", "entries"]
     assert doc["version"] == 1 and isinstance(doc["updated"], int) and abs(doc["updated"] - time.time()) < 60
-    assert doc["entries"] == [
+    assert [legacy(e) for e in doc["entries"]] == [
         {"id": aid(1), "title": "Alpha Movie", "days_left": 1, "can_keep": True},
         {"id": aid(2), "title": "Beta Show", "days_left": 35, "can_keep": False},
     ]
@@ -417,3 +423,72 @@ def test_leaving_rows_clean_titles():
     e = core.Entry("a" * 32, "Bad\x1b[31m<b>", 1.0, 3, 0, True)
     rows = core.leaving_rows([e], {}, 0.0, 30)
     assert rows[0]["title"] == "Bad??31m?b?"
+
+
+# ---------------------------------------------------------------- who kept it, and the history route
+def test_keep_body_accepts_an_optional_by():
+    assert api.parse_keep_body(b'{"title": "a"}') == ("a", None, "")
+    assert api.parse_keep_body(b'{"title": " a ", "by": "Ann Lee"}') == ("a", "Ann Lee", "")
+    for raw in (
+        b'{"by": "ann"}',
+        b'{"title": "a", "by": 5}',
+        b'{"title": "a", "by": ""}',
+        b'{"title": "a", "by": " ann"}',
+        b'{"title": "a", "by": "bad\\nname"}',
+        b'{"title": "a", "by": "' + b"a" * 61 + b'"}',
+        b'{"title": "a", "by": "x", "by": "y"}',
+        b'{"title": "a", "other": "x"}',
+    ):
+        assert api.parse_keep_body(raw)[0] is None, raw
+
+
+def test_a_keep_over_the_api_records_who_and_shows_in_the_history_route(serve, fake, env):
+    fake.schedule((aid(1), 29))
+    c = serve(LIVE)
+    assert c.call("POST", "/v1/keep", body={"title": "Alpha Movie", "by": "Ann"})[0] == 200
+    assert state.load(env["LOMBO_FAREWELL_STATE_FILE"])["kept"][aid(1)]["by"] == "Ann"
+    status, _, doc = c.call("GET", "/v1/keeps")
+    assert status == 200 and doc["version"] == 1
+    assert [(k["id"], k["title"], k["by"]) for k in doc["keeps"]] == [(aid(1), "Alpha Movie", "Ann")]
+    entry = c.call("GET", "/v1/leaving")[2]["entries"][0]
+    assert entry["can_keep"] is False and entry["kept"]["by"] == "Ann"
+
+
+def test_the_history_route_is_empty_before_any_keep_and_needs_get_and_the_token(serve):
+    c = serve()
+    assert c.call("GET", "/v1/keeps")[2] == {"version": 1, "keeps": []}
+    assert c.call("POST", "/v1/keeps", body={})[0] == 405
+    assert c.call("GET", "/v1/keeps", token="wrong" * 8)[0] == 401
+
+
+def test_the_person_limit_over_the_api_is_a_422_and_a_bad_by_is_a_400(serve, fake):
+    fake.schedule((aid(1), 29))
+    c = serve({**LIVE, "LOMBO_FAREWELL_MAX_KEEPS_PER_PERSON": "1"})
+    status, _, body = c.call("POST", "/v1/keep", body={"title": "Alpha Movie"})
+    assert status == 422 and "say who is keeping it" in body["message"]
+    assert c.call("POST", "/v1/keep", body={"title": "Alpha Movie", "by": ""})[0] == 400
+    assert fake.postponed == []
+
+
+def test_the_history_route_works_without_a_keeps_function():
+    import urllib.request
+
+    cfg = from_env(
+        {
+            "LOMBO_FAREWELL_JELLYFIN_URL": "http://x",
+            "LOMBO_FAREWELL_JELLYFIN_API_KEY": "k",
+            "LOMBO_FAREWELL_MAINTAINERR_URL": "http://x",
+            "LOMBO_FAREWELL_API_TOKEN": TOKEN,
+        }
+    )
+    server = api.make_server(cfg, lambda t, b: (True, "ok"), dict, bind=("127.0.0.1", 0), log=lambda t: None)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/v1/keeps", headers={"Authorization": f"Bearer {TOKEN}"}
+        )
+        with urllib.request.urlopen(req) as r:  # noqa: S310
+            assert json.loads(r.read()) == {"version": 1, "keeps": []}
+    finally:
+        server.shutdown()
+        server.server_close()

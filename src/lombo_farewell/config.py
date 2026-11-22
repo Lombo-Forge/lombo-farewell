@@ -30,6 +30,10 @@ SETTINGS = (
     "API_TOKEN",
     "API_BIND",
     "POST_KEEP_COMMAND",
+    "MAX_KEEPS_PER_PERSON",
+    "MAX_KEEPS_PER_TITLE",
+    "ALERT_ON_KEEP",
+    "ALERT_DELETING_SOON",
 )
 
 TOKEN_MIN = 24
@@ -61,6 +65,10 @@ class Config:
     api_token: str = ""  # `serve` needs it (see token_problem); empty means the API is off
     api_bind: str = DEFAULT_BIND  # host:port `serve` listens on
     post_keep_command: tuple[str, ...] = ()  # run once after a keep that postponed a title; empty = off
+    max_keeps_per_person: int = 0  # keeps one person may make per KEEP_DAYS days (needs `by`); 0 = no limit
+    max_keeps_per_title: int = 0  # times one title may be kept while it stays on the list; 0 = no limit
+    alert_on_keep: bool = False  # webhook message after a keep that postponed a title
+    alert_deleting_soon: bool = False  # webhook message once when a title is within a day of deletion
 
 
 def _truthy(value: str, name: str) -> bool:
@@ -164,6 +172,9 @@ def from_env(env: dict[str, str]) -> Config:
     except ValueError as e:
         raise ConfigError(f"{PREFIX}POST_KEEP_COMMAND is not a valid command: {e}") from None
 
+    max_per_person = _whole(get("MAX_KEEPS_PER_PERSON", "0"), "MAX_KEEPS_PER_PERSON", 0, 1000)
+    max_per_title = _whole(get("MAX_KEEPS_PER_TITLE", "0"), "MAX_KEEPS_PER_TITLE", 0, 1000)
+
     # Safe by default: nothing changes anything until the person sets DRY_RUN=false.
     return Config(
         url,
@@ -183,4 +194,8 @@ def from_env(env: dict[str, str]) -> Config:
         get("API_TOKEN"),
         bind,
         post_keep,
+        max_per_person,
+        max_per_title,
+        _truthy(get("ALERT_ON_KEEP", "false"), "ALERT_ON_KEEP"),
+        _truthy(get("ALERT_DELETING_SOON", "false"), "ALERT_DELETING_SOON"),
     )

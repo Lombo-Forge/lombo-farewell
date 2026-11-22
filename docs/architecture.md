@@ -30,6 +30,8 @@ Jellyfin <-- jellyfin.py <-- engine.py --> core.py (decides)
 | `core.diff(have, want, max_removals, keep_ids)` | ids in the collection, ids wanted in order, ids the source lists but Jellyfin did not match | `Diff(add, remove, held_back)`. At most `max_removals` removals per round; `keep_ids` are never removed. The shrink guard and the owned-collection check are in `engine.sync`. |
 | `core.find(entries, text)` | entries, what the person typed | `(entry, "")` or `(None, reason)`: exact name or id, then a unique part of a name; two matches is a refusal. |
 | `core.keep_check(entry)` | an entry or None | `ok`, `not-leaving`, `already-kept`. |
+| `core.limit_problem(by, record, history, now, keep_days, per_person, per_title)` | who, the title's state record, the keep history | `""` or the reason a keep is over a limit. |
+| `core.due_to_warn(entries, already)` | entries, ids warned before | titles within a day of deletion and not yet warned, and the new remembered set. |
 | `core.overdue_to_alert(entries, already)` | entries, ids alerted before | titles 2+ days late and not yet reported, and the new remembered set. |
 | `sources.MaintainerrSource` / `FileSource` | settings | `fetch() -> list[Candidate]`, `postpone(group, media_id, days) -> new deletion time`. Raise `SourceError` for anything unreadable. |
 | `jellyfin.Jellyfin` | URL, key | `find_collection`, `collection_members`, `create_collection`, `add_to_collection`, `remove_from_collection`, `names`, `ids_named`. Raises `JellyfinError`. |
@@ -37,7 +39,8 @@ Jellyfin <-- jellyfin.py <-- engine.py --> core.py (decides)
 | `engine.sync(jf, cfg, entries, apply)` | | `SyncReport`; with `apply=False` nothing is written |
 | `state` | a JSON file | `kept` titles and `alerted` ids; a damaged file means "start fresh". Also writes `leaving.json` (the contract in [contracts.md](contracts.md)). |
 | `core.leaving_rows(entries, kept, now, keep_days)` | entries, the `kept` notes | the rows of `leaving.json` and `GET /v1/leaving`; `can_keep` includes the keep limit |
-| `cli.keep_title(cfg, query, now)` | | `(done, message)`: the one keep rule, used by `keep` and the API (caller holds the run lock) |
+| `state.append_keep` / `load_keeps` | the state file's folder | the keep history `keeps.json` (newest 500). |
+| `cli.keep_title(cfg, query, now, by)` | | `(done, message)`: the one keep rule, used by `keep` and the API (caller holds the run lock) |
 | `api.make_server(cfg, keep, leaving)` | two functions from `cli.py` | an HTTP server (not started). Only HTTP, auth and limits live here; see [security.md](security.md) |
 
 A **source** is the adapter point. Anything that can produce `Candidate` values (a Jellyfin id or a title, a deletion time if known, and the wait in days if it can postpone) can be a source.

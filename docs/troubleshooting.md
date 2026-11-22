@@ -42,7 +42,7 @@ Run `plan`: a skipped title is named with the reason. A title Jellyfin lists und
 
 ## Keep does nothing
 
-`keep` refuses, with a reason, when: the source is `file` (nothing to tell), the name matches nothing or several titles, the title was already kept (its date is beyond the normal wait, or it was kept less than `KEEP_DAYS` days ago), or the source is down. In dry run it only says what it would do.
+`keep` refuses, with a reason, when: the source is `file` (nothing to tell), the name matches nothing or several titles, the title was already kept (its date is beyond the normal wait, or it was kept less than `KEEP_DAYS` days ago), a limit is used up (`MAX_KEEPS_PER_PERSON`, `MAX_KEEPS_PER_TITLE`; the message says which, and a missing name when the per-person limit is on), or the source is down. In dry run it only says what it would do.
 
 ## Turning it off
 

@@ -16,6 +16,7 @@ from lombo_farewell.config import ConfigError, from_env
 
 LIVE = {"LOMBO_FAREWELL_DRY_RUN": "false"}
 TOKEN = "t" * 32
+UNTIL = 1_799_971_200  # 2027-01-15, the fake Maintainerr answer
 
 
 def hook(tmp_path, exit_code=0):
@@ -38,7 +39,9 @@ def test_runs_once_with_the_id_and_title_after_a_cli_keep(env, fake, tmp_path):
     fake.schedule((aid(1), 29))
     command, out = hook(tmp_path)
     assert main(["keep", "Alpha Movie"], with_hook(env, command)) == 0
-    assert [json.loads(line) for line in out.read_text().splitlines()] == [{"id": aid(1), "title": "Alpha Movie"}]
+    assert [json.loads(line) for line in out.read_text().splitlines()] == [
+        {"id": aid(1), "title": "Alpha Movie", "by": None, "until": UNTIL}
+    ]
 
 
 def test_does_not_run_in_a_dry_run(env, fake, tmp_path):
@@ -102,7 +105,12 @@ def test_never_uses_a_shell_and_drops_output(env, fake, monkeypatch):
     assert not seen["kw"].get("shell")
     assert seen["kw"]["stdin"] == subprocess.DEVNULL
     assert seen["kw"]["capture_output"] is True
-    assert json.loads(seen["kw"]["env"]["LOMBO_FAREWELL_KEPT_JSON"]) == {"id": aid(1), "title": "Alpha Movie"}
+    assert json.loads(seen["kw"]["env"]["LOMBO_FAREWELL_KEPT_JSON"]) == {
+        "id": aid(1),
+        "title": "Alpha Movie",
+        "by": None,
+        "until": UNTIL,
+    }
 
 
 def test_empty_means_off_and_bad_syntax_stops_start_up(env, capsys):
@@ -181,7 +189,9 @@ def test_api_keep_runs_the_command_once(env, fake, tmp_path, served):
     port = served(with_hook(env, command))
     status, body = post_keep(port, "Alpha Movie")
     assert (status, body["ok"]) == (200, True)
-    assert [json.loads(line) for line in out.read_text().splitlines()] == [{"id": aid(1), "title": "Alpha Movie"}]
+    assert [json.loads(line) for line in out.read_text().splitlines()] == [
+        {"id": aid(1), "title": "Alpha Movie", "by": None, "until": UNTIL}
+    ]
     status, body = post_keep(port, "No Such Title")  # refused: the command does not run again
     assert status == 422
     assert len(out.read_text().splitlines()) == 1

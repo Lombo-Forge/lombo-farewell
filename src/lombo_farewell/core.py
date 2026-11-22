@@ -3,12 +3,13 @@
 - `plan()` turns what a source says is about to be deleted into one entry per title, soonest first.
 - `diff()` says how to change the Jellyfin collection, and never removes more than a cap in one round.
 - `keep_check()` and `find()` decide whether, and for which title, a "keep it longer" request can go ahead.
-- `overdue_to_alert()` picks the titles whose deletion is late and have not been reported yet.
+- `overdue_to_alert()` and `due_to_warn()` pick the titles that are late, or a day from deletion, and not yet reported.
+- `limit_problem()` applies the optional per-person and per-title keep limits.
 Nothing here deletes anything: the app only mirrors and postpones.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 DAY = 86400.0
 OVERDUE_ALERT_DAYS = 2
@@ -30,6 +31,7 @@ class Candidate:
     grace_days: float | None  # the normal wait before deletion; None when the source cannot postpone
     group: str | None = None  # the source's own group id (a Maintainerr collection)
     media_id: str | None = None  # the source's own id for the title, used to postpone it
+    group_name: str | None = None  # the source's own name for that group (a Maintainerr collection title)
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class Entry:
     can_keep: bool
     group: str | None = None
     media_id: str | None = None
+    group_name: str | None = None
 
     def __str__(self) -> str:
         if self.delete_at is None:
@@ -88,6 +91,7 @@ def plan(resolved: list[tuple[Candidate, str, str]], now: float, can_postpone: b
             can_keep=bool(can_postpone and left is not None and grace is not None and left <= grace * DAY + SLACK),
             group=cand.group,
             media_id=cand.media_id,
+            group_name=cand.group_name,
         )
         old = best.get(item)
         if old is None or _key(entry) < _key(old):
@@ -148,6 +152,24 @@ def keep_check(entry: Entry | None, kept: dict[str, object] | None = None, now: 
     return "ok"
 
 
+def _whole_time(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value != value or abs(value) > 1e12:
+        return None
+    return int(value)
+
+
+def kept_note(record: dict[str, object] | None) -> dict[str, object] | None:
+    """The `kept` object of a leaving.json entry, from a state record; None when the title was never kept."""
+    if not record:
+        return None
+    by = record.get("by")
+    return {
+        "by": clean(by) if isinstance(by, str) and by else None,
+        "at": _whole_time(record.get("at")),
+        "until": _whole_time(record.get("until")),
+    }
+
+
 def leaving_rows(
     entries: list[Entry], kept: dict[str, dict[str, object]], now: float, keep_days: int
 ) -> list[dict[str, object]]:
@@ -161,9 +183,73 @@ def leaving_rows(
             "title": clean(e.title),
             "days_left": e.days_left,
             "can_keep": keep_check(e, kept.get(e.item_id), now, keep_days) == "ok",
+            "delete_at": None if e.delete_at is None else _whole_time(e.delete_at),
+            "overdue_days": e.overdue_days,
+            "group": None if e.group is None else clean(e.group),
+            "group_name": None if e.group_name is None else clean(e.group_name),
+            "kept": kept_note(kept.get(e.item_id)),
         }
         for e in entries
     ]
+
+
+def after_keep(entry: Entry, until: float, now: float) -> Entry:
+    """The entry as it is right after a keep: new date, not keepable again."""
+    return replace(
+        entry, delete_at=until, days_left=max(0, math.ceil((until - now) / DAY)), overdue_days=0, can_keep=False
+    )
+
+
+def limit_problem(
+    by: str | None,
+    record: dict[str, object] | None,
+    history: list[dict[str, object]],
+    now: float,
+    keep_days: int,
+    per_person: int,
+    per_title: int,
+) -> str:
+    """Why a keep is over a limit, or '' when it may go ahead. A limit of 0 is off.
+
+    `record` is the title's state record (`count` = keeps so far while it stayed on the list); `history` is the
+    keep history. A person is counted by name, ignoring case, over the last `keep_days` days.
+    """
+    if per_title:
+        count = record.get("count", 1) if record else 0
+        if isinstance(count, int) and not isinstance(count, bool) and count >= per_title:
+            return f"it was already kept {count} time(s), the most allowed ({per_title}); it will be deleted"
+    if per_person:
+        if not by:
+            return 'say who is keeping it (--by NAME, or "by" in the request): keeps are limited per person'
+        who = by.casefold()
+        since = now - keep_days * DAY
+        used = 0
+        for h in history:
+            name, at = h.get("by"), h.get("at")
+            if isinstance(name, str) and isinstance(at, int | float) and name.casefold() == who and at > since:
+                used += 1
+        if used >= per_person:
+            return f"{clean(by)} has used {used} of {per_person} keeps allowed per {keep_days} days"
+    return ""
+
+
+def due_to_warn(entries: list[Entry], already: set[str]) -> tuple[list[Entry], set[str]]:
+    """Titles within a day of deletion (not yet late) that were not warned about yet.
+
+    Returns (to_report, remembered). A title that is kept (days left grows) or leaves the list is forgotten, so it
+    can be warned about again later.
+    """
+    due = [e for e in entries if e.days_left is not None and e.days_left <= 1 and e.overdue_days == 0]
+    ids = {e.item_id for e in due}
+    return [e for e in due if e.item_id not in already], (already & ids) | ids
+
+
+MAX_BY = 60  # characters in the name of the person who kept a title
+
+
+def valid_by(text: str) -> bool:
+    """A usable 'who kept it' name: 1 to 60 printable characters, no leading or trailing spaces."""
+    return bool(text) and len(text) <= MAX_BY and text.isprintable() and text == text.strip()
 
 
 def clean(text: str) -> str:
