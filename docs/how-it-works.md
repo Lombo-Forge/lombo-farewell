@@ -15,7 +15,7 @@
 2. Look the titles up in Jellyfin (names by id, or ids by exact name). Titles Jellyfin does not know are skipped and named in the output.
 3. Work out each title's days left, and sort soonest first. A title in two Maintainerr groups is listed once, with the sooner date.
 4. Compare with the collection: add what is missing, then remove what is stale (at most `MAX_REMOVALS_PER_ROUND`).
-5. With `DRY_RUN=false`: send an alert for any title 2 or more days overdue (once), forget `kept` notes for titles that left the list, save the state file.
+5. With `DRY_RUN=false`: send an alert for any title 2 or more days overdue (once), and, with `ALERT_DELETING_SOON=true`, one for any title within a day of deletion (once); forget `kept` notes for titles that left the list; save the state file and `leaving.json`.
 
 ## How a deletion date is worked out
 
@@ -39,18 +39,19 @@ The collection (`COLLECTION_NAME`, locked, made on the first live run) should ho
 
 1. Reads the source and finds the one title that matches (exact name or Jellyfin id first, then a unique part of a name).
 2. Refuses if nothing or more than one title matches, or if the title is already kept (its date is beyond the normal wait, or it was kept less than `KEEP_DAYS` days ago according to the state file).
-3. With `DRY_RUN=true`, says what it would do and stops.
-4. Otherwise asks Maintainerr to postpone that title by `KEEP_DAYS` days and writes down the new date.
-5. Releases the run lock, then, if `POST_KEEP_COMMAND` is set, runs it once (60 seconds at most). A slow command
+3. Refuses if a limit is over: `MAX_KEEPS_PER_TITLE` (counted in the state file) or `MAX_KEEPS_PER_PERSON` (counted from `keeps.json`, by name, ignoring case, over the last `KEEP_DAYS` days; it also refuses a keep with no name). Both are off by default.
+4. With `DRY_RUN=true`, says what it would do and stops.
+5. Otherwise asks Maintainerr to postpone that title by `KEEP_DAYS` days, writes down the new date, who kept it and how many times, adds a row to `keeps.json` and rewrites `leaving.json` so a reader sees the keep at once. A failure to write the last two is a warning only.
+6. Releases the run lock, then sends the keep alert (`ALERT_ON_KEEP`) and, if `POST_KEEP_COMMAND` is set, runs it once (60 seconds at most). A slow command
    therefore never holds up a round or another keep. If it fails, the keep still counts and a short note says so.
 
 The title stays in the collection until it is really gone; Jellyfin shows no per-title date, so check `plan`.
 
 ## What is remembered
 
-The state file (`LOMBO_FAREWELL_STATE_FILE`, JSON) holds the titles that were kept (name, when, until) and the ids already alerted as overdue. Deleting it can repeat an overdue alert and nothing else.
+The state file (`LOMBO_FAREWELL_STATE_FILE`, JSON) holds the titles that were kept (name, when, until, who, how many times) and the ids already alerted as overdue or as deleting soon. Deleting it can repeat an alert, forget a keep note (and so the per-title count) and nothing else.
 
-A live round also writes `leaving.json` next to it: the leaving list for other apps to read. It is a view, rebuilt every round, and nothing reads it back; its shape is in [contracts.md](contracts.md).
+A live round also writes `leaving.json` next to it: the leaving list for other apps to read. It is a view, rebuilt every round and after every live keep, and nothing reads it back. `keeps.json` is the keep history (newest 500). Their shapes are in [contracts.md](contracts.md).
 
 ## What it never does
 

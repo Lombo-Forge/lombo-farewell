@@ -76,6 +76,7 @@ def maintainerr_candidates(collections: Any, media: dict[Any, Any]) -> list[Cand
                     grace_days=float(grace),
                     group=str(coll.get("id")),
                     media_id=str(m["mediaServerId"]),
+                    group_name=coll["title"] if isinstance(coll.get("title"), str) and coll["title"] else None,
                 )
             )
     return out
