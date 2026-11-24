@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lombo-farewell"
-version = "0.3.0"
+version = "0.3.1"
 description = "Mirrors the titles a cleanup tool will delete into a Leaving soon collection in Jellyfin, and postpones a deletion on request."
 readme = "README.md"
 requires-python = ">=3.12"
